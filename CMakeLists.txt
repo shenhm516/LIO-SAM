@@ -52,7 +52,8 @@ catkin_package(
 
 # include directories
 include_directories(
-	include
+  include
+  src/Factor
 	${catkin_INCLUDE_DIRS}
 	${PCL_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
@@ -61,7 +62,7 @@ include_directories(
 
 # link directories
 link_directories(
-	include
+  include
 	${PCL_LIBRARY_DIRS}
   ${OpenCV_LIBRARY_DIRS}
   ${GTSAM_LIBRARY_DIRS}

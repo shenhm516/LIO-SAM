@@ -8,6 +8,7 @@
 #include <gtsam/navigation/GPSFactor.h>
 #include <gtsam/navigation/ImuFactor.h>
 #include <gtsam/navigation/CombinedImuFactor.h>
+#include "lidarFactorGtsam.hpp"
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
 #include <gtsam/nonlinear/Marginals.h>
@@ -54,10 +55,15 @@ public:
     // gtsam
     NonlinearFactorGraph gtSAMgraph;
     Values initialEstimate;
-    Values optimizedEstimate;
+    // Values optimizedEstimate;
     ISAM2 *isam;
     Values isamCurrentEstimate;
     Eigen::MatrixXd poseCovariance;
+
+    NonlinearFactorGraph LoamGraph;
+    Values LoamInitialEstimate;
+    // ISAM2 *LoamIsam;
+    Values LoamIsamCurrentEstimate;
 
     ros::Publisher pubLaserCloudSurround;
     ros::Publisher pubOdomAftMappedROS;
@@ -153,6 +159,7 @@ public:
         parameters.relinearizeThreshold = 0.1;
         parameters.relinearizeSkip = 1;
         isam = new ISAM2(parameters);
+        // LoamIsam = new ISAM2(parameters);
 
         pubKeyPoses = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/mapping/trajectory", 1);
         pubLaserCloudSurround = nh.advertise<sensor_msgs::PointCloud2>("lio_sam/mapping/map_global", 1);
@@ -819,46 +826,19 @@ public:
 
                 if (matD1.at<float>(0, 0) > 3 * matD1.at<float>(0, 1)) 
                 {
-                    float x0 = pointSel.x;
-                    float y0 = pointSel.y;
-                    float z0 = pointSel.z;
+                    gtsam::Vector3 curr_point(pointOri.x, pointOri.y, pointOri.z);
                     float x1 = cx + 0.1 * matV1.at<float>(0, 0);
                     float y1 = cy + 0.1 * matV1.at<float>(0, 1);
                     float z1 = cz + 0.1 * matV1.at<float>(0, 2);
                     float x2 = cx - 0.1 * matV1.at<float>(0, 0);
                     float y2 = cy - 0.1 * matV1.at<float>(0, 1);
                     float z2 = cz - 0.1 * matV1.at<float>(0, 2);
-
-                    float a012 = sqrt(((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1)) * ((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1)) 
-                                    + ((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1)) * ((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1)) 
-                                    + ((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1)) * ((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1)));
-
-                    float l12 = sqrt((x1 - x2)*(x1 - x2) + (y1 - y2)*(y1 - y2) + (z1 - z2)*(z1 - z2));
-
-                    float la = ((y1 - y2)*((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1)) 
-                              + (z1 - z2)*((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1))) / a012 / l12;
-
-                    float lb = -((x1 - x2)*((x0 - x1)*(y0 - y2) - (x0 - x2)*(y0 - y1)) 
-                               - (z1 - z2)*((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1))) / a012 / l12;
-
-                    float lc = -((x1 - x2)*((x0 - x1)*(z0 - z2) - (x0 - x2)*(z0 - z1)) 
-                               + (y1 - y2)*((y0 - y1)*(z0 - z2) - (y0 - y2)*(z0 - z1))) / a012 / l12;
-
-                    float ld2 = a012 / l12;
-
-                    float s = 1 - 0.9 * fabs(ld2);
-
-                    coeff.x = s * la;
-                    coeff.y = s * lb;
-                    coeff.z = s * lc;
-                    coeff.intensity = s * ld2;
-
-                    if (s > 0.1) 
-                    {
-                        laserCloudOriCornerVec[i] = pointOri;
-                        coeffSelCornerVec[i] = coeff;
-                        laserCloudOriCornerFlag[i] = true;
-                    }
+                    gtsam::Vector3 point_a (x1, y1, z1);
+                    gtsam::Vector3 point_b (x2, y2, z2);
+                    gtsam::noiseModel::Diagonal::shared_ptr edge_gaussian_model = gtsam::noiseModel::Diagonal::Variances((gtsam::Vector(3) << 1.0, 1.0, 1.0).finished());
+                    gtsam::noiseModel::Robust::shared_ptr edge_noise_model = gtsam::noiseModel::Robust::Create(gtsam::noiseModel::mEstimator::Huber::Create(0.1), edge_gaussian_model);
+                    gtsam::LidarPose3EdgeFactor factor(0, curr_point, point_a, point_b, edge_noise_model);
+                    LoamGraph.push_back(factor);
                 }
             }
         }
@@ -915,169 +895,45 @@ public:
                 }
 
                 if (planeValid) {
-                    float pd2 = pa * pointSel.x + pb * pointSel.y + pc * pointSel.z + pd;
-
-                    float s = 1 - 0.9 * fabs(pd2) / sqrt(sqrt(pointSel.x * pointSel.x
-                            + pointSel.y * pointSel.y + pointSel.z * pointSel.z));
-
-                    coeff.x = s * pa;
-                    coeff.y = s * pb;
-                    coeff.z = s * pc;
-                    coeff.intensity = s * pd2;
-
-                    if (s > 0.1) {
-                        laserCloudOriSurfVec[i] = pointOri;
-                        coeffSelSurfVec[i] = coeff;
-                        laserCloudOriSurfFlag[i] = true;
-                    }
+                    gtsam::Vector3 curr_point(pointOri.x, pointOri.y, pointOri.z);
+                    gtsam::Vector3 norm(pa, pb, pc);
+                    gtsam::noiseModel::Diagonal::shared_ptr surf_gaussian_model = gtsam::noiseModel::Diagonal::Variances((gtsam::Vector(1) << 1.0).finished());
+				    gtsam::noiseModel::Robust::shared_ptr surf_noise_model = gtsam::noiseModel::Robust::Create(gtsam::noiseModel::mEstimator::Huber::Create(0.1), surf_gaussian_model);
+				    gtsam::LidarPose3PlaneNormFactor factor(0, curr_point, norm, pd, surf_noise_model);				    
+				    LoamGraph.push_back(factor);
                 }
             }
         }
     }
 
-    void combineOptimizationCoeffs()
+    bool LMOptimization()
     {
-        // combine corner coeffs
-        for (int i = 0; i < laserCloudCornerLastDSNum; ++i){
-            if (laserCloudOriCornerFlag[i] == true){
-                laserCloudOri->push_back(laserCloudOriCornerVec[i]);
-                coeffSel->push_back(coeffSelCornerVec[i]);
-            }
-        }
-        // combine surf coeffs
-        for (int i = 0; i < laserCloudSurfLastDSNum; ++i){
-            if (laserCloudOriSurfFlag[i] == true){
-                laserCloudOri->push_back(laserCloudOriSurfVec[i]);
-                coeffSel->push_back(coeffSelSurfVec[i]);
-            }
-        }
-        // reset flag for next iteration
-        std::fill(laserCloudOriCornerFlag.begin(), laserCloudOriCornerFlag.end(), false);
-        std::fill(laserCloudOriSurfFlag.begin(), laserCloudOriSurfFlag.end(), false);
-    }
-
-    bool LMOptimization(int iterCount)
-    {
-        // This optimization is from the original loam_velodyne by Ji Zhang, need to cope with coordinate transformation
-        // lidar <- camera      ---     camera <- lidar
-        // x = z                ---     x = y
-        // y = x                ---     y = z
-        // z = y                ---     z = x
-        // roll = yaw           ---     roll = pitch
-        // pitch = roll         ---     pitch = yaw
-        // yaw = pitch          ---     yaw = roll
-
-        // lidar -> camera
-        float srx = sin(transformTobeMapped[1]);
-        float crx = cos(transformTobeMapped[1]);
-        float sry = sin(transformTobeMapped[2]);
-        float cry = cos(transformTobeMapped[2]);
-        float srz = sin(transformTobeMapped[0]);
-        float crz = cos(transformTobeMapped[0]);
-
-        int laserCloudSelNum = laserCloudOri->size();
-        if (laserCloudSelNum < 50) {
-            return false;
-        }
-
-        cv::Mat matA(laserCloudSelNum, 6, CV_32F, cv::Scalar::all(0));
-        cv::Mat matAt(6, laserCloudSelNum, CV_32F, cv::Scalar::all(0));
-        cv::Mat matAtA(6, 6, CV_32F, cv::Scalar::all(0));
-        cv::Mat matB(laserCloudSelNum, 1, CV_32F, cv::Scalar::all(0));
-        cv::Mat matAtB(6, 1, CV_32F, cv::Scalar::all(0));
-        cv::Mat matX(6, 1, CV_32F, cv::Scalar::all(0));
-        cv::Mat matP(6, 6, CV_32F, cv::Scalar::all(0));
-
-        PointType pointOri, coeff;
-
-        for (int i = 0; i < laserCloudSelNum; i++) {
-            // lidar -> camera
-            pointOri.x = laserCloudOri->points[i].y;
-            pointOri.y = laserCloudOri->points[i].z;
-            pointOri.z = laserCloudOri->points[i].x;
-            // lidar -> camera
-            coeff.x = coeffSel->points[i].y;
-            coeff.y = coeffSel->points[i].z;
-            coeff.z = coeffSel->points[i].x;
-            coeff.intensity = coeffSel->points[i].intensity;
-            // in camera
-            float arx = (crx*sry*srz*pointOri.x + crx*crz*sry*pointOri.y - srx*sry*pointOri.z) * coeff.x
-                      + (-srx*srz*pointOri.x - crz*srx*pointOri.y - crx*pointOri.z) * coeff.y
-                      + (crx*cry*srz*pointOri.x + crx*cry*crz*pointOri.y - cry*srx*pointOri.z) * coeff.z;
-
-            float ary = ((cry*srx*srz - crz*sry)*pointOri.x 
-                      + (sry*srz + cry*crz*srx)*pointOri.y + crx*cry*pointOri.z) * coeff.x
-                      + ((-cry*crz - srx*sry*srz)*pointOri.x 
-                      + (cry*srz - crz*srx*sry)*pointOri.y - crx*sry*pointOri.z) * coeff.z;
-
-            float arz = ((crz*srx*sry - cry*srz)*pointOri.x + (-cry*crz-srx*sry*srz)*pointOri.y)*coeff.x
-                      + (crx*crz*pointOri.x - crx*srz*pointOri.y) * coeff.y
-                      + ((sry*srz + cry*crz*srx)*pointOri.x + (crz*sry-cry*srx*srz)*pointOri.y)*coeff.z;
-            // lidar -> camera
-            matA.at<float>(i, 0) = arz;
-            matA.at<float>(i, 1) = arx;
-            matA.at<float>(i, 2) = ary;
-            matA.at<float>(i, 3) = coeff.z;
-            matA.at<float>(i, 4) = coeff.x;
-            matA.at<float>(i, 5) = coeff.y;
-            matB.at<float>(i, 0) = -coeff.intensity;
-        }
-
-        cv::transpose(matA, matAt);
-        matAtA = matAt * matA;
-        matAtB = matAt * matB;
-        cv::solve(matAtA, matAtB, matX, cv::DECOMP_QR);
-
-        if (iterCount == 0) {
-
-            cv::Mat matE(1, 6, CV_32F, cv::Scalar::all(0));
-            cv::Mat matV(6, 6, CV_32F, cv::Scalar::all(0));
-            cv::Mat matV2(6, 6, CV_32F, cv::Scalar::all(0));
-
-            cv::eigen(matAtA, matE, matV);
-            matV.copyTo(matV2);
-
-            isDegenerate = false;
-            float eignThre[6] = {100, 100, 100, 100, 100, 100};
-            for (int i = 5; i >= 0; i--) {
-                if (matE.at<float>(0, i) < eignThre[i]) {
-                    for (int j = 0; j < 6; j++) {
-                        matV2.at<float>(i, j) = 0;
-                    }
-                    isDegenerate = true;
-                } else {
-                    break;
-                }
-            }
-            matP = matV.inv() * matV2;
-        }
-
-        if (isDegenerate) {
-            cv::Mat matX2(6, 1, CV_32F, cv::Scalar::all(0));
-            matX.copyTo(matX2);
-            matX = matP * matX2;
-        }
-
-        transformTobeMapped[0] += matX.at<float>(0, 0);
-        transformTobeMapped[1] += matX.at<float>(1, 0);
-        transformTobeMapped[2] += matX.at<float>(2, 0);
-        transformTobeMapped[3] += matX.at<float>(3, 0);
-        transformTobeMapped[4] += matX.at<float>(4, 0);
-        transformTobeMapped[5] += matX.at<float>(5, 0);
-
+        gtsam::Pose3 InitPose = trans2gtsamPose(transformTobeMapped);
+        LoamInitialEstimate.insert(0, InitPose);
+        gtsam::LevenbergMarquardtParams optimizer_params;
+        optimizer_params.setLinearSolverType("MULTIFRONTAL_QR");
+        optimizer_params.setRelativeErrorTol(1e-4);
+        gtsam::LevenbergMarquardtOptimizer optimizer(LoamGraph, LoamInitialEstimate, optimizer_params);
+		LoamInitialEstimate.clear();
+        LoamGraph.resize(0);    
+        LoamIsamCurrentEstimate = optimizer.optimize();
+        transformTobeMapped[0] = LoamIsamCurrentEstimate.at<Pose3>(LoamIsamCurrentEstimate.size()-1).rotation().roll();
+        transformTobeMapped[1] = LoamIsamCurrentEstimate.at<Pose3>(LoamIsamCurrentEstimate.size()-1).rotation().pitch();
+        transformTobeMapped[2] = LoamIsamCurrentEstimate.at<Pose3>(LoamIsamCurrentEstimate.size()-1).rotation().yaw();
+        transformTobeMapped[3] = LoamIsamCurrentEstimate.at<Pose3>(LoamIsamCurrentEstimate.size()-1).translation().x();
+        transformTobeMapped[4] = LoamIsamCurrentEstimate.at<Pose3>(LoamIsamCurrentEstimate.size()-1).translation().y();
+        transformTobeMapped[5] = LoamIsamCurrentEstimate.at<Pose3>(LoamIsamCurrentEstimate.size()-1).translation().z();
         float deltaR = sqrt(
-                            pow(pcl::rad2deg(matX.at<float>(0, 0)), 2) +
-                            pow(pcl::rad2deg(matX.at<float>(1, 0)), 2) +
-                            pow(pcl::rad2deg(matX.at<float>(2, 0)), 2));
+                            pow(pcl::rad2deg(transformTobeMapped[0]-InitPose.rotation().roll()), 2) +
+                            pow(pcl::rad2deg(transformTobeMapped[1]-InitPose.rotation().pitch()), 2) +
+                            pow(pcl::rad2deg(transformTobeMapped[2]-InitPose.rotation().yaw()), 2));
         float deltaT = sqrt(
-                            pow(matX.at<float>(3, 0) * 100, 2) +
-                            pow(matX.at<float>(4, 0) * 100, 2) +
-                            pow(matX.at<float>(5, 0) * 100, 2));
+                            pow((transformTobeMapped[3]-InitPose.translation().x()) * 100, 2) +
+                            pow((transformTobeMapped[4]-InitPose.translation().y()) * 100, 2) +
+                            pow((transformTobeMapped[5]-InitPose.translation().z()) * 100, 2));
 
-        if (deltaR < 0.05 && deltaT < 0.05) {
-            return true; // converged
-        }
-        return false; // keep optimizing
+        if (deltaR < 0.05 && deltaT < 0.05) return true; // converged        
+        else return false; // keep optimizing
     }
 
     void scan2MapOptimization()
@@ -1098,9 +954,7 @@ public:
                 cornerOptimization();
                 surfOptimization();
 
-                combineOptimizationCoeffs();
-
-                if (LMOptimization(iterCount) == true)
+                if (LMOptimization() == true)
                     break;              
             }
 
